@@ -13,7 +13,7 @@ from telebot import types
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ================= Configuration =================
-TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8687292220:AAEh8u_qsd0EubB3F8x8bmw7jfqJxnrWYL8")
+TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 admin_ids_env = os.environ.get("ADMIN_IDS", "123456789")
 ADMIN_IDS = [int(x.strip()) for x in admin_ids_env.split(",") if x.strip().isdigit()]
 
