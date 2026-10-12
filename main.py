@@ -1,11 +1,29 @@
 """
-🚀 Nexus Extractor - PRO TELEGRAM BOT & WEB GATEWAY (REDIS INTEGRATED)
+🚀 Nexus Extractor - PRO TELEGRAM BOT & WEB GATEWAY (STABLE REDIS INTEGRATED)
 """
-import os, json, asyncio, logging, secrets, uuid, random, urllib.parse, re, time, io, urllib3
+import os
+import json
+import logging
+import secrets
+import uuid
+import random
+import urllib.parse
+import re
+import time
+import io
+import threading
+import urllib3
+import hashlib
+import base64
 from datetime import datetime
-from aiohttp import web
+
+# ماژول‌های شبکه و وب
+import requests
 from bs4 import BeautifulSoup
-import redis.asyncio as aioredis
+from aiohttp import web
+import redis
+
+# ماژول ربات تلگرام
 import telebot
 from telebot import types
 
@@ -23,12 +41,13 @@ REDIS_URL = os.environ.get("REDIS_URL", "redis://default:DWYgsUKwUJTjTMQpasIEHBY
 
 APP_SECRET_HEADER = "JetApp-Secure-Client"
 
-db = aioredis.from_url(REDIS_URL, decode_responses=True)
+# اتصال مستقیم و همگام به دیتابیس ردیس برای جلوگیری از خطای Event Loop
+redis_client = redis.Redis.from_url(REDIS_URL, decode_responses=True)
 bot = telebot.TeleBot(TOKEN)
 
 logging.basicConfig(format='%(asctime)s - %(message)s', level=logging.INFO)
 
-# متغیرهای موقت محلی برای ربات تلگرام
+# حافظه موقت ربات
 user_data = {}
 user_proxies = {}
 
@@ -139,7 +158,8 @@ def check_purchase_history(session, dk_token, logs):
 # ================= Telegram Handlers =================
 @bot.message_handler(commands=['start', 'help', 'admin'])
 def send_welcome(message):
-    if message.from_user.id not in ADMIN_IDS: return
+    if message.from_user.id not in ADMIN_IDS: 
+        return
     markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton("🔗 دریافت لینک‌های ساخته شده (با تعداد)", callback_data="adm_export_links"))
     markup.add(types.InlineKeyboardButton("📦 دریافت لینک‌های دارای سابقه خرید", callback_data="adm_export_ordered"))
@@ -149,34 +169,42 @@ def send_welcome(message):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("adm_"))
 def admin_callback(call):
-    if call.from_user.id not in ADMIN_IDS: return
+    if call.from_user.id not in ADMIN_IDS: 
+        return
     chat_id = call.message.chat.id
+    bot.answer_callback_query(call.id)
     
     if call.data == "adm_export_links":
-        records = asyncio.run(db.hgetall("jet:bulk_accounts"))
+        records = redis_client.hgetall("jet:bulk_accounts")
         if not records:
             bot.send_message(chat_id, "❌ هیچ لینکی در سیستم موجود نیست.")
             return
         text_content = f"🔗 لیست کل لینک‌های استخراج شده (تعداد: {len(records)}):\n\n"
         for phone, val in records.items():
-            data = json.loads(val)
-            link = f"{WEBHOOK_URL}/auth/{data['token']}"
-            text_content += f"📱 شماره: {phone}\n🔗 لینک: {link}\n──────────────────\n"
+            try:
+                data = json.loads(val)
+                link = f"{WEBHOOK_URL}/auth/{data.get('token', '')}"
+                text_content += f"📱 شماره: {phone}\n🔗 لینک: {link}\n──────────────────\n"
+            except Exception:
+                continue
         file_bytes = io.BytesIO(text_content.encode('utf-8'))
         file_bytes.name = f"Nexus_All_Links_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
         bot.send_document(chat_id, file_bytes, caption=f"✅ لیست {len(records)} لینک ورود آماده شد.")
 
     elif call.data == "adm_export_ordered":
-        ordered_records = asyncio.run(db.hgetall("jet:ordered_accounts"))
+        ordered_records = redis_client.hgetall("jet:ordered_accounts")
         if not ordered_records:
             bot.send_message(chat_id, "❌ هیچ اکانت دارای سفارشی یافت نشد.")
             return
         text_content = f"📦 لیست اکانت‌های دارای سابقه خرید (تعداد: {len(ordered_records)}):\n\n"
         for phone, val in ordered_records.items():
-            data = json.loads(val)
-            token = data.get("token", "")
-            link = f"{WEBHOOK_URL}/auth/{token}" if token else "لینک ناموجود"
-            text_content += f"📱 شماره: {phone}\n🔗 لینک: {link}\n──────────────────\n"
+            try:
+                data = json.loads(val)
+                token = data.get("token", "")
+                link = f"{WEBHOOK_URL}/auth/{token}" if token else "لینک ناموجود"
+                text_content += f"📱 شماره: {phone}\n🔗 لینک: {link}\n──────────────────\n"
+            except Exception:
+                continue
         file_bytes = io.BytesIO(text_content.encode('utf-8'))
         file_bytes.name = f"Nexus_Ordered_Links_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
         bot.send_document(chat_id, file_bytes, caption=f"✅ لیست {len(ordered_records)} اکانت دارای سفارش آماده شد.")
@@ -384,16 +412,15 @@ def process_code_step(message):
             final_json = {"cookies": extension_cookies, "origins": []}
             session_token = secrets.token_urlsafe(14)
             
-            # ذخیره نشست در ردیس برای استفاده اپلیکیشن
-            asyncio.run(db.setex(f"jet_session:{session_token}", 30 * 24 * 3600, json.dumps(final_json, ensure_ascii=False)))
-            
+            # ذخیره نشست در ردیس به صورت مستقیم و بدون تداخل با Event Loop
+            redis_client.setex(f"jet_session:{session_token}", 30 * 24 * 3600, json.dumps(final_json, ensure_ascii=False))
             record = {"phone": phone, "token": session_token, "name": "کاربر دیجی‌کالا"}
             
             if total_orders > 0:
-                asyncio.run(db.hset("jet:ordered_accounts", phone, json.dumps(record, ensure_ascii=False)))
+                redis_client.hset("jet:ordered_accounts", phone, json.dumps(record, ensure_ascii=False))
                 order_status_text = f"✅ تعداد خریدهای اکانت: {total_orders} (ذخیره در بخش خریدداران)"
             else:
-                asyncio.run(db.hset("jet:bulk_accounts", phone, json.dumps(record, ensure_ascii=False)))
+                redis_client.hset("jet:bulk_accounts", phone, json.dumps(record, ensure_ascii=False))
                 order_status_text = "⚠️ این اکانت خام است و هیچ سفارشی نداشته (ذخیره در لینک‌های عادی)."
                 try:
                     with open("clean_accounts.txt", "a", encoding="utf-8") as f:
@@ -415,7 +442,7 @@ def process_code_step(message):
 # ================= Secure Gateway Web Route =================
 async def web_secure_gateway(request: web.Request):
     token_key = request.match_info.get("token")
-    session_data_str = await db.get(f"jet_session:{token_key}")
+    session_data_str = redis_client.get(f"jet_session:{token_key}")
 
     if not session_data_str:
         return web.Response(text="پیوند منقضی یا نامعتبر است.", status=404, content_type="text/plain;charset=utf-8")
@@ -429,18 +456,18 @@ async def web_secure_gateway(request: web.Request):
     html_blocked = '<html dir="rtl" lang="fa"><meta charset="UTF-8"><body style="font-family:Tahoma;text-align:center;margin-top:50px;"><h3>دسترسی مسدود است</h3><p>لینک فقط در اپلیکیشن باز می‌شود.</p></body></html>'
     return web.Response(text=html_blocked, content_type="text/html")
 
-# ================= Background Main Runner =================
-async def main():
-    web_app = web.Application()
-    web_app.router.add_get("/auth/{token}", web_secure_gateway)
-    
-    runner = web.AppRunner(web_app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
-    await site.start()
-    
-    print("🤖 Bot and Web Gateway are running simultaneously...")
-    bot.infinity_polling()
+def run_bot():
+    """اجرای ربات تلگرام در Thread مجزا جهت جلوگیری از تداخل با سرور وب"""
+    logging.info("🤖 ربات تلگرام آماده دریافت پیام است...")
+    bot.infinity_polling(skip_pending=True)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    # اجرای تلگرام در پس‌زمینه
+    t = threading.Thread(target=run_bot, daemon=True)
+    t.start()
+
+    # اجرای وب‌گیت‌وی روی سرور
+    app = web.Application()
+    app.router.add_get("/auth/{token}", web_secure_gateway)
+    logging.info(f"🌐 وب‌سرور روی پورت {PORT} روشن شد...")
+    web.run_app(app, host="0.0.0.0", port=PORT)
