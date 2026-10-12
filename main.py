@@ -1,5 +1,5 @@
 """
-🚀 Nexus Extractor - PRO TELEGRAM BOT & WEB GATEWAY (STABLE REDIS INTEGRATED)
+🚀 Nexus Extractor - PRO TELEGRAM BOT & WEB GATEWAY (STABLE & TESTED)
 """
 import os
 import json
@@ -41,10 +41,14 @@ REDIS_URL = os.environ.get("REDIS_URL", "redis://default:DWYgsUKwUJTjTMQpasIEHBY
 
 APP_SECRET_HEADER = "JetApp-Secure-Client"
 
-# اتصال مستقیم و همگام به دیتابیس ردیس برای جلوگیری از خطای Event Loop
-redis_client = redis.Redis.from_url(REDIS_URL, decode_responses=True)
-bot = telebot.TeleBot(TOKEN)
+# اتصال امن با تایم‌اوت به دیتابیس ردیس
+try:
+    redis_client = redis.Redis.from_url(REDIS_URL, decode_responses=True, socket_connect_timeout=5, socket_timeout=5)
+except Exception as e:
+    logging.error(f"Redis Init Error: {e}")
+    redis_client = None
 
+bot = telebot.TeleBot(TOKEN)
 logging.basicConfig(format='%(asctime)s - %(message)s', level=logging.INFO)
 
 # حافظه موقت ربات
@@ -57,6 +61,11 @@ def generate_pkce():
     hashed = hashlib.sha256(verifier.encode('ascii')).digest()
     challenge = base64.urlsafe_b64encode(hashed).decode('ascii').rstrip('=')
     return verifier, challenge
+
+def normalize_digits(text):
+    """تبدیل اعداد فارسی به انگلیسی"""
+    p2e = str.maketrans('۰۱۲۳۴۵۶۷۸۹', '0123456789')
+    return text.translate(p2e).strip()
 
 def format_proxy(p_str):
     p_str = p_str.strip()
@@ -74,15 +83,18 @@ def get_main_keyboard():
     return markup
 
 def send_final_file(chat_id, status_message, logs, extracted_data=None):
-    bot.send_message(chat_id, status_message)
-    report_text = "\n".join(logs)
-    if extracted_data:
-        report_text += "\n\n====== [ اطلاعات خروجی مشابه سیستم bg1 ] ======\n"
-        report_text += json.dumps(extracted_data, ensure_ascii=False, indent=4)
-        
-    file_obj = io.BytesIO(report_text.encode('utf-8'))
-    file_obj.name = f"Nexus_Report_{int(time.time())}.txt"
-    bot.send_document(chat_id, file_obj, caption="📄 فایل لاگ و دیتای نشست")
+    try:
+        bot.send_message(chat_id, status_message, reply_markup=get_main_keyboard())
+        report_text = "\n".join(logs)
+        if extracted_data:
+            report_text += "\n\n====== [ اطلاعات خروجی مشابه سیستم bg1 ] ======\n"
+            report_text += json.dumps(extracted_data, ensure_ascii=False, indent=4)
+            
+        file_obj = io.BytesIO(report_text.encode('utf-8'))
+        file_obj.name = f"Nexus_Report_{int(time.time())}.txt"
+        bot.send_document(chat_id, file_obj, caption="📄 فایل لاگ و دیتای نشست")
+    except Exception as e:
+        bot.send_message(chat_id, f"❌ خطا در ارسال فایل لاگ: {str(e)}")
 
 def check_purchase_history(session, dk_token, logs):
     """استخراج تاریخچه خریدها از طریق API دیجی‌کالاجت"""
@@ -98,7 +110,7 @@ def check_purchase_history(session, dk_token, logs):
         }
         res_sa = session.get("https://api.digikala.com/super-app/v1/sso/jet/", 
                              params={"redirect_url": "/?utm_source=digikala-superweb"}, 
-                             headers=sa_headers, allow_redirects=False, timeout=15)
+                             headers=sa_headers, allow_redirects=False, timeout=10)
         sa_token = None
         if 'Location' in res_sa.headers:
             match = re.search(r'sa_token=([^&]+)', res_sa.headers['Location'])
@@ -106,7 +118,7 @@ def check_purchase_history(session, dk_token, logs):
         if not sa_token:
             res_sa_redirect = session.get("https://api.digikala.com/super-app/v1/sso/jet/", 
                                           params={"redirect_url": "/?utm_source=digikala-superweb"},
-                                          headers=sa_headers, allow_redirects=True, timeout=15)
+                                          headers=sa_headers, allow_redirects=True, timeout=10)
             parsed = urllib.parse.urlparse(res_sa_redirect.url)
             qs = urllib.parse.parse_qs(parsed.query)
             if 'sa_token' in qs: sa_token = qs['sa_token'][0]
@@ -126,19 +138,19 @@ def check_purchase_history(session, dk_token, logs):
             'user-agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 Chrome/137.0.0.0 Mobile'
         }
         res_jet = session.post("https://api.digikalajet.ir/super-app-sso/",
-                               headers=jet_headers, json={"dsa_token": sa_token}, timeout=15)
+                               headers=jet_headers, json={"dsa_token": sa_token}, timeout=10)
         if res_jet.status_code != 200:
             logs.append(f"❌ خطا در لاگین جت | Status: {res_jet.status_code}")
             return 0
             
         jet_token = res_jet.json().get('data', {}).get('token')
         if not jet_token:
-            logs.append("❌ توکن نهایی جت در ریسپانس یافت نشد.")
+            logs.append("❌ توکن نهایی جت یافت نشد.")
             return 0
 
         jet_headers['Authorization'] = jet_token
         jet_headers['session'] = f"{uuid.uuid4()}-V3*{int(time.time())}"
-        res_orders = session.get("https://api.digikalajet.ir/order-shipments/?ch=jj", headers=jet_headers, timeout=15)
+        res_orders = session.get("https://api.digikalajet.ir/order-shipments/?ch=jj", headers=jet_headers, timeout=10)
         if res_orders.status_code == 200:
             res_json = res_orders.json()
             if res_json.get("status") == 200:
@@ -148,7 +160,7 @@ def check_purchase_history(session, dk_token, logs):
                 ongoing = len(orders_obj.get("ongoing", []) or [])
                 accomplished = len(orders_obj.get("accomplished", []) or [])
                 total_orders = max(pager_total, ongoing + accomplished)
-                logs.append(f"✅ سوابق خرید استخراج شد. مجموع خریدها: {total_orders}")
+                logs.append(f"✅ سوابق خرید استخراج شد: {total_orders}")
                 return total_orders
         return 0
     except Exception as e:
@@ -174,40 +186,50 @@ def admin_callback(call):
     chat_id = call.message.chat.id
     bot.answer_callback_query(call.id)
     
+    if not redis_client:
+        bot.send_message(chat_id, "❌ خطا: اتصال ردیس برقرار نیست.")
+        return
+
     if call.data == "adm_export_links":
-        records = redis_client.hgetall("jet:bulk_accounts")
-        if not records:
-            bot.send_message(chat_id, "❌ هیچ لینکی در سیستم موجود نیست.")
-            return
-        text_content = f"🔗 لیست کل لینک‌های استخراج شده (تعداد: {len(records)}):\n\n"
-        for phone, val in records.items():
-            try:
-                data = json.loads(val)
-                link = f"{WEBHOOK_URL}/auth/{data.get('token', '')}"
-                text_content += f"📱 شماره: {phone}\n🔗 لینک: {link}\n──────────────────\n"
-            except Exception:
-                continue
-        file_bytes = io.BytesIO(text_content.encode('utf-8'))
-        file_bytes.name = f"Nexus_All_Links_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
-        bot.send_document(chat_id, file_bytes, caption=f"✅ لیست {len(records)} لینک ورود آماده شد.")
+        try:
+            records = redis_client.hgetall("jet:bulk_accounts")
+            if not records:
+                bot.send_message(chat_id, "❌ هیچ لینکی در سیستم موجود نیست.")
+                return
+            text_content = f"🔗 لیست کل لینک‌های استخراج شده (تعداد: {len(records)}):\n\n"
+            for phone, val in records.items():
+                try:
+                    data = json.loads(val)
+                    link = f"{WEBHOOK_URL}/auth/{data.get('token', '')}"
+                    text_content += f"📱 شماره: {phone}\n🔗 لینک: {link}\n──────────────────\n"
+                except Exception:
+                    continue
+            file_bytes = io.BytesIO(text_content.encode('utf-8'))
+            file_bytes.name = f"Nexus_All_Links_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+            bot.send_document(chat_id, file_bytes, caption=f"✅ لیست {len(records)} لینک ورود آماده شد.")
+        except Exception as e:
+            bot.send_message(chat_id, f"❌ خطای ردیس: {e}")
 
     elif call.data == "adm_export_ordered":
-        ordered_records = redis_client.hgetall("jet:ordered_accounts")
-        if not ordered_records:
-            bot.send_message(chat_id, "❌ هیچ اکانت دارای سفارشی یافت نشد.")
-            return
-        text_content = f"📦 لیست اکانت‌های دارای سابقه خرید (تعداد: {len(ordered_records)}):\n\n"
-        for phone, val in ordered_records.items():
-            try:
-                data = json.loads(val)
-                token = data.get("token", "")
-                link = f"{WEBHOOK_URL}/auth/{token}" if token else "لینک ناموجود"
-                text_content += f"📱 شماره: {phone}\n🔗 لینک: {link}\n──────────────────\n"
-            except Exception:
-                continue
-        file_bytes = io.BytesIO(text_content.encode('utf-8'))
-        file_bytes.name = f"Nexus_Ordered_Links_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
-        bot.send_document(chat_id, file_bytes, caption=f"✅ لیست {len(ordered_records)} اکانت دارای سفارش آماده شد.")
+        try:
+            ordered_records = redis_client.hgetall("jet:ordered_accounts")
+            if not ordered_records:
+                bot.send_message(chat_id, "❌ هیچ اکانت دارای سفارشی یافت نشد.")
+                return
+            text_content = f"📦 لیست اکانت‌های دارای سابقه خرید (تعداد: {len(ordered_records)}):\n\n"
+            for phone, val in ordered_records.items():
+                try:
+                    data = json.loads(val)
+                    token = data.get("token", "")
+                    link = f"{WEBHOOK_URL}/auth/{token}" if token else "لینک ناموجود"
+                    text_content += f"📱 شماره: {phone}\n🔗 لینک: {link}\n──────────────────\n"
+                except Exception:
+                    continue
+            file_bytes = io.BytesIO(text_content.encode('utf-8'))
+            file_bytes.name = f"Nexus_Ordered_Links_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+            bot.send_document(chat_id, file_bytes, caption=f"✅ لیست {len(ordered_records)} اکانت دارای سفارش آماده شد.")
+        except Exception as e:
+            bot.send_message(chat_id, f"❌ خطای ردیس: {e}")
 
     elif call.data == "adm_set_proxy":
         bot.send_message(chat_id, "🌐 لطفاً پروکسی‌های خود را ارسال کنید (هر خط یک پروکسی یا فایل txt):")
@@ -226,7 +248,7 @@ def get_clean_accounts(message):
 @bot.message_handler(func=lambda m: m.text == "🌐 تنظیم پروکسی" or m.text == "/proxy")
 def setup_proxy(message):
     msg = ("🌐 **تنظیمات پروکسی:**\n\n"
-           "لطفاً پروکسی‌های خود را بفرستید. (پیام متنی یا آپلود فایل .txt)")
+           "لطفاً پروکسی‌های خود را بفرستید. (پیام متنی یا فایل .txt)")
     bot.reply_to(message, msg, parse_mode="Markdown")
     bot.register_next_step_handler(message, process_proxy_list)
 
@@ -238,77 +260,90 @@ def handle_docs(message):
 def process_proxy_list(message):
     chat_id = message.chat.id
     proxies_list = []
-    if message.document:
-        file_info = bot.get_file(message.document.file_id)
-        downloaded_file = bot.download_file(file_info.file_path)
-        content = downloaded_file.decode('utf-8').splitlines()
-        for line in content:
-            p = format_proxy(line)
-            if p: proxies_list.append(p)
-    elif message.text:
-        for line in message.text.splitlines():
-            p = format_proxy(line)
-            if p: proxies_list.append(p)
-            
-    if proxies_list:
-        user_proxies[chat_id] = proxies_list
-        bot.send_message(chat_id, f"✅ تعداد {len(proxies_list)} پروکسی تنظیم شد.\n\nاکنون شماره موبایل را بفرستید.", reply_markup=get_main_keyboard())
-    else:
-        bot.send_message(chat_id, "❌ پروکسی معتبری یافت نشد!", reply_markup=get_main_keyboard())
+    try:
+        if message.document:
+            file_info = bot.get_file(message.document.file_id)
+            downloaded_file = bot.download_file(file_info.file_path)
+            content = downloaded_file.decode('utf-8').splitlines()
+            for line in content:
+                p = format_proxy(line)
+                if p: proxies_list.append(p)
+        elif message.text:
+            for line in message.text.splitlines():
+                p = format_proxy(line)
+                if p: proxies_list.append(p)
+                
+        if proxies_list:
+            user_proxies[chat_id] = proxies_list
+            bot.send_message(chat_id, f"✅ تعداد {len(proxies_list)} پروکسی تنظیم شد.\n\nاکنون شماره موبایل را بفرستید.", reply_markup=get_main_keyboard())
+        else:
+            bot.send_message(chat_id, "❌ پروکسی معتبری یافت نشد!", reply_markup=get_main_keyboard())
+    except Exception as e:
+        bot.send_message(chat_id, f"❌ خطا در پردازش پروکسی: {e}", reply_markup=get_main_keyboard())
 
 # ================= Phone & OTP Handlers =================
-@bot.message_handler(func=lambda m: m.text and m.text.startswith("09") and len(m.text.strip()) == 11)
+@bot.message_handler(func=lambda m: m.text and normalize_digits(m.text).startswith("09") and len(normalize_digits(m.text)) == 11)
 def process_phone_step(message):
-    phone = message.text.strip()
     chat_id = message.chat.id
+    phone = normalize_digits(message.text)
     
-    bot.send_message(chat_id, f"⏳ در حال برقراری ارتباط برای شماره {phone}...")
-    session = requests.Session()
-    logs = [f"====== [ شروع عملیات برای: {phone} ] ======"]
-    
-    proxies = user_proxies.get(chat_id, [])
-    if proxies:
-        proxy_url = random.choice(proxies)
-        session.proxies = {"http": proxy_url, "https": proxy_url}
-        logs.append(f"🌐 Proxy in use: {proxy_url}")
-    else:
-        logs.append("🌐 Proxy: No Proxy (Direct Connection)")
-
-    session.headers.update({
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-        'Accept-Language': 'fa,en-US;q=0.7,en;q=0.3'
-    })
-
-    verifier, challenge = generate_pkce()
-    nonce = secrets.token_urlsafe(16)
-    state = secrets.token_urlsafe(16)
-    redirect_uri = "https://www.digikala.com/sso-redirect/?back-url=%2Fprofile%2F"
-
-    auth_url = (
-        "https://auth.digikala.com/realms/dk-group/protocol/openid-connect/auth"
-        f"?client_id=digikala-web-public&redirect_uri={urllib.parse.quote(redirect_uri)}"
-        f"&response_mode=fragment&response_type=code&scope=openid&nonce={nonce}&state={state}"
-        f"&code_challenge={challenge}&code_challenge_method=S256"
-    )
-
     try:
+        bot.send_message(chat_id, f"⏳ در حال برقراری ارتباط برای شماره {phone}...")
+        session = requests.Session()
+        logs = [f"====== [ شروع عملیات برای: {phone} ] ======"]
+        
+        proxies = user_proxies.get(chat_id, [])
+        if proxies:
+            proxy_url = random.choice(proxies)
+            session.proxies = {"http": proxy_url, "https": proxy_url}
+            logs.append(f"🌐 Proxy in use: {proxy_url}")
+        else:
+            logs.append("🌐 Proxy: No Proxy (Direct Connection)")
+            logs.append("⚠️ توجه: اتصال مستقیم از سرور خارج ممکن است توسط دیجی‌کالا مسدود شود.")
+
+        session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            'Accept-Language': 'fa,en-US;q=0.7,en;q=0.3'
+        })
+
+        verifier, challenge = generate_pkce()
+        nonce = secrets.token_urlsafe(16)
+        state = secrets.token_urlsafe(16)
+        redirect_uri = "https://www.digikala.com/sso-redirect/?back-url=%2Fprofile%2F"
+
+        auth_url = (
+            "https://auth.digikala.com/realms/dk-group/protocol/openid-connect/auth"
+            f"?client_id=digikala-web-public&redirect_uri={urllib.parse.quote(redirect_uri)}"
+            f"&response_mode=fragment&response_type=code&scope=openid&nonce={nonce}&state={state}"
+            f"&code_challenge={challenge}&code_challenge_method=S256"
+        )
+
         session.headers.update({"Referer": "https://www.digikala.com/"})
-        res = session.get(auth_url, timeout=15)
+        res = session.get(auth_url, timeout=12)
+        logs.append(f"▶️ GET Auth URL | Status: {res.status_code}")
+
+        if res.status_code == 403:
+            send_final_file(chat_id, "❌ آی‌پی سرور توسط دیجی‌کالا مسدود است (403). حتماً پروکسی ایرانی تنظیم کنید.", logs)
+            return
+
         soup = BeautifulSoup(res.text, 'html.parser')
         form = soup.find('form')
         
         if not form:
-            send_final_file(chat_id, "❌ خطا: فرم ورود یافت نشد.", logs)
+            send_final_file(chat_id, "❌ خطا: فرم ورود در سایت یافت نشد.", logs)
             return
 
         action_url = form.get('action').replace('&amp;', '&')
         session.headers.update({"Referer": res.url})
-        res = session.post(action_url, data={"username": phone, "rememberMe": "on"}, timeout=15)
+        res = session.post(action_url, data={"username": phone, "rememberMe": "on"}, timeout=12)
+        logs.append(f"◀️ POST Phone Response | Status: {res.status_code}")
+        
         soup = BeautifulSoup(res.text, 'html.parser')
 
-        # سوییچ هوشمند رمزدار / بدون رمز
+        # سوییچ هوشمند برای اکانت‌های رمزدار
         if soup.find('input', {'name': 'password'}) or soup.find('input', {'type': 'password'}):
+            logs.append("⚠️ درخواست رمز عبور مشاهده شد. در حال ارسال توکن سوییچ پیامک...")
             otp_exec_input = soup.find('input', {'id': 'otp-auth-execution'})
             if otp_exec_input and otp_exec_input.has_attr('value'):
                 exec_val = otp_exec_input['value']
@@ -317,13 +352,23 @@ def process_phone_step(message):
                 if form_action:
                     form_action = form_action.replace('&amp;', '&')
                     session.headers.update({"Referer": res.url})
+                    # پارامتر دقیق بر اساس استاندارد Keycloak
                     payload = {"authenticationExecution": exec_val}
-                    res = session.post(form_action, data=payload, timeout=15)
+                    res = session.post(form_action, data=payload, timeout=12)
+                    logs.append(f"◀️ OTP Switch Response | Status: {res.status_code}")
                     soup = BeautifulSoup(res.text, 'html.parser')
-        
+            else:
+                logs.append("❌ خطا: فیلد otp-auth-execution پیدا نشد.")
+                send_final_file(chat_id, "❌ ساختار فرم رمز تغییر کرده است.", logs)
+                return
+        else:
+            logs.append("⚡ اکانت بدون رمز عبور است. هدایت مستقیم به پیامک.")
+
         form_otp = soup.find('form')
         if not form_otp or not soup.find('input', {'name': 'code'}): 
-            send_final_file(chat_id, "❌ خطا: فرم دریافت پیامک بارگذاری نشد.", logs)
+            snippet = res.text[:200].replace('\n', ' ')
+            logs.append(f"❌ فرم دریافت پیامک یافت نشد:\n{snippet}")
+            send_final_file(chat_id, "❌ فرم پیامک باز نشد. پروکسی خود را تغییر دهید.", logs)
             return
             
         otp_action_url = form_otp.get('action').replace('&amp;', '&')
@@ -341,15 +386,19 @@ def process_phone_step(message):
         msg_reply = bot.send_message(chat_id, "✅ پیامک ارسال شد!\n\nلطفاً کد تایید ۵ یا ۶ رقمی را بفرستید:")
         bot.register_next_step_handler(msg_reply, process_code_step)
 
+    except requests.exceptions.ProxyError:
+        send_final_file(chat_id, "❌ پروکسی شما کار نمی‌کند، لطفاً پروکسی جدید ثبت کنید.", logs)
+    except requests.exceptions.Timeout:
+        send_final_file(chat_id, "❌ زمان اتصال به سرور دیجی‌کالا به پایان رسید (Timeout).", logs)
     except Exception as e:
-        send_final_file(chat_id, f"❌ خطای ارتباطی: {str(e)}", logs)
+        bot.send_message(chat_id, f"❌ خطای پیش‌بینی نشده در شروع عملیات: {str(e)}", reply_markup=get_main_keyboard())
 
 def process_code_step(message):
-    code = message.text.strip()
     chat_id = message.chat.id
+    code = normalize_digits(message.text.strip())
     
     if chat_id not in user_data:
-        bot.send_message(chat_id, "⚠️ نشست منقضی شد. لطفا شماره موبایل را مجدداً بفرستید.", reply_markup=get_main_keyboard())
+        bot.send_message(chat_id, "⚠️ نشست شما منقضی شد. لطفاً مجدداً شماره را بفرستید.", reply_markup=get_main_keyboard())
         return
         
     udata = user_data[chat_id]
@@ -357,10 +406,14 @@ def process_code_step(message):
     logs = udata['logs']
     phone = udata['phone']
     
-    bot.send_message(chat_id, "⏳ در حال بررسی کد و چک کردن سوابق خرید...")
+    bot.send_message(chat_id, "⏳ در حال بررسی کد و استخراج دیتای حساب...")
+    logs.append(f"💬 کد وارد شده: {code}")
+
     try:
         session.headers.update({"Referer": "https://auth.digikala.com/"})
-        res = session.post(udata['otp_action_url'], data={"code": code}, allow_redirects=False, timeout=15)
+        res = session.post(udata['otp_action_url'], data={"code": code}, allow_redirects=False, timeout=12)
+        logs.append(f"▶️ POST OTP Code | Status: {res.status_code}")
+
         auth_code = None
         if 'Location' in res.headers:
             cmatch = re.search(r'code=([^&]+)', res.headers['Location'])
@@ -370,7 +423,7 @@ def process_code_step(message):
             if cmatch: auth_code = cmatch.group(1)
 
         if not auth_code:
-            send_final_file(chat_id, "❌ کد تایید نامعتبر است.", logs)
+            send_final_file(chat_id, "❌ کد تایید اشتباه یا منقضی شده است.", logs)
             return
 
         token_data = {
@@ -380,7 +433,8 @@ def process_code_step(message):
             "redirect_uri": udata['redirect_uri'],
             "code_verifier": udata['verifier']
         }
-        res_token = session.post("https://auth.digikala.com/realms/dk-group/protocol/openid-connect/token", data=token_data, timeout=15)
+        res_token = session.post("https://auth.digikala.com/realms/dk-group/protocol/openid-connect/token", data=token_data, timeout=12)
+        logs.append(f"◀️ Token Exchange | Status: {res_token.status_code}")
 
         if res_token.status_code == 200:
             tokens = res_token.json()
@@ -412,16 +466,25 @@ def process_code_step(message):
             final_json = {"cookies": extension_cookies, "origins": []}
             session_token = secrets.token_urlsafe(14)
             
-            # ذخیره نشست در ردیس به صورت مستقیم و بدون تداخل با Event Loop
-            redis_client.setex(f"jet_session:{session_token}", 30 * 24 * 3600, json.dumps(final_json, ensure_ascii=False))
-            record = {"phone": phone, "token": session_token, "name": "کاربر دیجی‌کالا"}
-            
-            if total_orders > 0:
-                redis_client.hset("jet:ordered_accounts", phone, json.dumps(record, ensure_ascii=False))
-                order_status_text = f"✅ تعداد خریدهای اکانت: {total_orders} (ذخیره در بخش خریدداران)"
+            # ذخیره در ردیس
+            if redis_client:
+                try:
+                    redis_client.setex(f"jet_session:{session_token}", 30 * 24 * 3600, json.dumps(final_json, ensure_ascii=False))
+                    record = {"phone": phone, "token": session_token, "name": "کاربر دیجی‌کالا"}
+                    
+                    if total_orders > 0:
+                        redis_client.hset("jet:ordered_accounts", phone, json.dumps(record, ensure_ascii=False))
+                        order_status_text = f"✅ تعداد خریدهای اکانت: {total_orders} (ذخیره در بخش خریداران)"
+                    else:
+                        redis_client.hset("jet:bulk_accounts", phone, json.dumps(record, ensure_ascii=False))
+                        order_status_text = "⚠️ این اکانت خام است و خریدی نداشته است (0)."
+                except Exception as e:
+                    logs.append(f"❌ خطای ردیس: {e}")
+                    order_status_text = f"سوابق: {total_orders}"
             else:
-                redis_client.hset("jet:bulk_accounts", phone, json.dumps(record, ensure_ascii=False))
-                order_status_text = "⚠️ این اکانت خام است و هیچ سفارشی نداشته (ذخیره در لینک‌های عادی)."
+                order_status_text = f"سوابق: {total_orders}"
+
+            if total_orders == 0:
                 try:
                     with open("clean_accounts.txt", "a", encoding="utf-8") as f:
                         f.write(f"{json.dumps({'phone': phone, 'data': final_json}, ensure_ascii=False)}\n")
@@ -432,9 +495,10 @@ def process_code_step(message):
             final_message = f"✅ ورود موفقیت‌آمیز بود!\n\n🛍 {order_status_text}\n\nفایل دیتای کاربر در حال ارسال است..."
             send_final_file(chat_id, final_message, logs, payload)
         else:
-            send_final_file(chat_id, "❌ خطا در دریافت توکن نهایی.", logs)
+            send_final_file(chat_id, "❌ خطا در دریافت توکن نهایی از سرور دیجی‌کالا.", logs)
+
     except Exception as e:
-        send_final_file(chat_id, f"❌ خطای سیستم: {str(e)}", logs)
+        bot.send_message(chat_id, f"❌ خطا در پردازش کد تایید: {str(e)}", reply_markup=get_main_keyboard())
     finally:
         if chat_id in user_data:
             del user_data[chat_id]
@@ -442,7 +506,13 @@ def process_code_step(message):
 # ================= Secure Gateway Web Route =================
 async def web_secure_gateway(request: web.Request):
     token_key = request.match_info.get("token")
-    session_data_str = redis_client.get(f"jet_session:{token_key}")
+    if not redis_client:
+        return web.Response(text="خطای سرویس دیتابیس", status=500)
+        
+    try:
+        session_data_str = redis_client.get(f"jet_session:{token_key}")
+    except Exception:
+        session_data_str = None
 
     if not session_data_str:
         return web.Response(text="پیوند منقضی یا نامعتبر است.", status=404, content_type="text/plain;charset=utf-8")
@@ -457,16 +527,18 @@ async def web_secure_gateway(request: web.Request):
     return web.Response(text=html_blocked, content_type="text/html")
 
 def run_bot():
-    """اجرای ربات تلگرام در Thread مجزا جهت جلوگیری از تداخل با سرور وب"""
-    logging.info("🤖 ربات تلگرام آماده دریافت پیام است...")
-    bot.infinity_polling(skip_pending=True)
+    logging.info("🤖 ربات تلگرام روشن شد...")
+    while True:
+        try:
+            bot.infinity_polling(skip_pending=True, timeout=20, long_polling_timeout=20)
+        except Exception as e:
+            logging.error(f"Polling Crash Restarting... {e}")
+            time.sleep(3)
 
 if __name__ == "__main__":
-    # اجرای تلگرام در پس‌زمینه
     t = threading.Thread(target=run_bot, daemon=True)
     t.start()
 
-    # اجرای وب‌گیت‌وی روی سرور
     app = web.Application()
     app.router.add_get("/auth/{token}", web_secure_gateway)
     logging.info(f"🌐 وب‌سرور روی پورت {PORT} روشن شد...")
