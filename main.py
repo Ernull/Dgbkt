@@ -13,7 +13,7 @@ from telebot import types
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ================= Configuration =================
-TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8687292220:AAEh8u_qsd0EubB3F8x8bmw7jfqJxnrWYL8")
 admin_ids_env = os.environ.get("ADMIN_IDS", "123456789")
 ADMIN_IDS = [int(x.strip()) for x in admin_ids_env.split(",") if x.strip().isdigit()]
 
@@ -148,12 +148,12 @@ def send_welcome(message):
     bot.send_message(message.chat.id, "محیط آماده به کار است. برای ورود شماره موبایل بفرستید:", reply_markup=get_main_keyboard())
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("adm_"))
-async def admin_callback(call):
+def admin_callback(call):
     if call.from_user.id not in ADMIN_IDS: return
     chat_id = call.message.chat.id
     
     if call.data == "adm_export_links":
-        records = await db.hgetall("jet:bulk_accounts")
+        records = asyncio.run(db.hgetall("jet:bulk_accounts"))
         if not records:
             bot.send_message(chat_id, "❌ هیچ لینکی در سیستم موجود نیست.")
             return
@@ -162,12 +162,12 @@ async def admin_callback(call):
             data = json.loads(val)
             link = f"{WEBHOOK_URL}/auth/{data['token']}"
             text_content += f"📱 شماره: {phone}\n🔗 لینک: {link}\n──────────────────\n"
-        file_bytes = BytesIO(text_content.encode('utf-8'))
+        file_bytes = io.BytesIO(text_content.encode('utf-8'))
         file_bytes.name = f"Nexus_All_Links_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
         bot.send_document(chat_id, file_bytes, caption=f"✅ لیست {len(records)} لینک ورود آماده شد.")
 
     elif call.data == "adm_export_ordered":
-        ordered_records = await db.hgetall("jet:ordered_accounts")
+        ordered_records = asyncio.run(db.hgetall("jet:ordered_accounts"))
         if not ordered_records:
             bot.send_message(chat_id, "❌ هیچ اکانت دارای سفارشی یافت نشد.")
             return
@@ -177,7 +177,7 @@ async def admin_callback(call):
             token = data.get("token", "")
             link = f"{WEBHOOK_URL}/auth/{token}" if token else "لینک ناموجود"
             text_content += f"📱 شماره: {phone}\n🔗 لینک: {link}\n──────────────────\n"
-        file_bytes = BytesIO(text_content.encode('utf-8'))
+        file_bytes = io.BytesIO(text_content.encode('utf-8'))
         file_bytes.name = f"Nexus_Ordered_Links_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
         bot.send_document(chat_id, file_bytes, caption=f"✅ لیست {len(ordered_records)} اکانت دارای سفارش آماده شد.")
 
@@ -385,18 +385,15 @@ def process_code_step(message):
             session_token = secrets.token_urlsafe(14)
             
             # ذخیره نشست در ردیس برای استفاده اپلیکیشن
-            asyncio.run_coroutine_threadsafe(
-                db.setex(f"jet_session:{session_token}", 30 * 24 * 3600, json.dumps(final_json, ensure_ascii=False)), 
-                loop
-            )
+            asyncio.run(db.setex(f"jet_session:{session_token}", 30 * 24 * 3600, json.dumps(final_json, ensure_ascii=False)))
             
             record = {"phone": phone, "token": session_token, "name": "کاربر دیجی‌کالا"}
             
             if total_orders > 0:
-                asyncio.run_coroutine_threadsafe(db.hset("jet:ordered_accounts", phone, json.dumps(record, ensure_ascii=False)), loop)
+                asyncio.run(db.hset("jet:ordered_accounts", phone, json.dumps(record, ensure_ascii=False)))
                 order_status_text = f"✅ تعداد خریدهای اکانت: {total_orders} (ذخیره در بخش خریدداران)"
             else:
-                asyncio.run_coroutine_threadsafe(db.hset("jet:bulk_accounts", phone, json.dumps(record, ensure_ascii=False)), loop)
+                asyncio.run(db.hset("jet:bulk_accounts", phone, json.dumps(record, ensure_ascii=False)))
                 order_status_text = "⚠️ این اکانت خام است و هیچ سفارشی نداشته (ذخیره در لینک‌های عادی)."
                 try:
                     with open("clean_accounts.txt", "a", encoding="utf-8") as f:
@@ -433,12 +430,7 @@ async def web_secure_gateway(request: web.Request):
     return web.Response(text=html_blocked, content_type="text/html")
 
 # ================= Background Main Runner =================
-loop = None
-
 async def main():
-    global loop
-    loop = asyncio.get_running_loop()
-    
     web_app = web.Application()
     web_app.router.add_get("/auth/{token}", web_secure_gateway)
     
